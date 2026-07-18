@@ -9,6 +9,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
 :root{
   --bg:#0d1117;
@@ -238,8 +239,8 @@ tr:hover td{background:var(--bg-panel2);}
       </div>
 
       <label class="dropzone" id="dropzone">
-        <input type="file" id="fileInput" accept=".csv">
-        <div class="big">📄 Clique ou arraste o arquivo CSV aqui</div>
+        <input type="file" id="fileInput" accept=".csv,.xlsx,.xls">
+        <div class="big">📄 Clique ou arraste o arquivo CSV ou Excel (.xlsx) aqui</div>
         <div class="small">Um novo lote será somado ao histórico do painel</div>
       </label>
 
@@ -544,6 +545,18 @@ function guessColumn(headers, aliasList){
 
 function handleFile(file){
   document.getElementById('uploadStatus').innerHTML = `<p style="color:var(--text-dim);font-size:12.5px;">Lendo arquivo "${file.name}"...</p>`;
+  const ext = file.name.toLowerCase().split('.').pop();
+
+  if(ext === 'xlsx' || ext === 'xls'){
+    readExcelFile(file);
+  } else if(ext === 'csv') {
+    readCSVFile(file);
+  } else {
+    document.getElementById('uploadStatus').innerHTML = `<p style="color:var(--err);font-size:12.5px;">Formato não suportado (.${ext}). Envie um arquivo .csv, .xlsx ou .xls.</p>`;
+  }
+}
+
+function readCSVFile(file){
   Papa.parse(file, {
     header:true,
     skipEmptyLines:true,
@@ -553,24 +566,53 @@ function handleFile(file){
         document.getElementById('uploadStatus').innerHTML = `<p style="color:var(--err);font-size:12.5px;">Arquivo vazio ou ilegível.</p>`;
         return;
       }
-      const headers = res.meta.fields;
-      const mapping = {
-        funcionario: guessColumn(headers, COLUMN_ALIASES.funcionario),
-        rota: guessColumn(headers, COLUMN_ALIASES.rota),
-        id_pacote: guessColumn(headers, COLUMN_ALIASES.id_pacote),
-        horario: guessColumn(headers, COLUMN_ALIASES.horario),
-        status: guessColumn(headers, COLUMN_ALIASES.status)
-      };
-      if(!mapping.funcionario || !mapping.id_pacote){
-        document.getElementById('uploadStatus').innerHTML = `<p style="color:var(--err);font-size:12.5px;">Não consegui identificar as colunas de Funcionário e/ou ID do Pacote nesse CSV. Colunas encontradas: ${headers.join(', ')}.</p>`;
-        return;
-      }
-      importData(res.data, mapping, file.name);
+      processParsedRows(res.data, res.meta.fields, file.name);
     },
     error: err => {
       document.getElementById('uploadStatus').innerHTML = `<p style="color:var(--err);font-size:12.5px;">Erro ao ler CSV: ${err.message}</p>`;
     }
   });
+}
+
+function readExcelFile(file){
+  const reader = new FileReader();
+  reader.onload = e => {
+    try{
+      const data = new Uint8Array(e.target.result);
+      const wb = XLSX.read(data, { type: 'array', cellDates:true });
+      const sheetName = wb.SheetNames[0];
+      const sheet = wb.Sheets[sheetName];
+      // defval:'' garante que células vazias virem string vazia em vez de sumir da linha
+      const json = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
+      if(!json.length){
+        document.getElementById('uploadStatus').innerHTML = `<p style="color:var(--err);font-size:12.5px;">A planilha "${sheetName}" está vazia.</p>`;
+        return;
+      }
+      const headers = Object.keys(json[0]);
+      processParsedRows(json, headers, file.name);
+    }catch(err){
+      document.getElementById('uploadStatus').innerHTML = `<p style="color:var(--err);font-size:12.5px;">Erro ao ler Excel: ${err.message}</p>`;
+    }
+  };
+  reader.onerror = () => {
+    document.getElementById('uploadStatus').innerHTML = `<p style="color:var(--err);font-size:12.5px;">Não foi possível ler o arquivo.</p>`;
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function processParsedRows(rows, headers, filename){
+  const mapping = {
+    funcionario: guessColumn(headers, COLUMN_ALIASES.funcionario),
+    rota: guessColumn(headers, COLUMN_ALIASES.rota),
+    id_pacote: guessColumn(headers, COLUMN_ALIASES.id_pacote),
+    horario: guessColumn(headers, COLUMN_ALIASES.horario),
+    status: guessColumn(headers, COLUMN_ALIASES.status)
+  };
+  if(!mapping.funcionario || !mapping.id_pacote){
+    document.getElementById('uploadStatus').innerHTML = `<p style="color:var(--err);font-size:12.5px;">Não consegui identificar as colunas de Funcionário e/ou ID do Pacote. Colunas encontradas: ${headers.join(', ')}.</p>`;
+    return;
+  }
+  importData(rows, mapping, filename);
 }
 
 function parseStatus(val){
