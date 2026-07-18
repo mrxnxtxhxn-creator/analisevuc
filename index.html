@@ -212,6 +212,7 @@ tr:hover td{background:var(--bg-panel2);}
     <div class="menu-item active" data-view="upload"><span class="ic">⭱</span> Importar CSV</div>
     <div class="menu-item" data-view="resumo"><span class="ic">▤</span> Resumo Geral</div>
     <div class="menu-item" data-view="funcionarios"><span class="ic">☰</span> Funcionários</div>
+    <div class="menu-item" data-view="analises"><span class="ic">📈</span> Análises</div>
     <div class="menu-item" data-view="historico"><span class="ic">◷</span> Histórico</div>
     <div class="side-footer">SQLite (sql.js) local no navegador. Nenhum dado sai do seu computador.</div>
   </nav>
@@ -243,12 +244,6 @@ tr:hover td{background:var(--bg-panel2);}
       </label>
 
       <div id="uploadStatus" style="margin-top:16px;"></div>
-
-      <div class="btn-row" style="margin-top:20px;">
-        <button class="btn secondary" id="btnMapColumns" style="display:none;">Confirmar mapeamento de colunas</button>
-      </div>
-
-      <div id="mapArea"></div>
     </section>
 
     <!-- ===================== RESUMO GERAL ===================== -->
@@ -352,6 +347,63 @@ tr:hover td{background:var(--bg-panel2);}
       </div>
     </section>
 
+    <!-- ===================== ANALISES ===================== -->
+    <section class="view" id="view-analises">
+      <div class="view-header">
+        <div>
+          <h2>Análises</h2>
+          <p>Ranking, comparativos entre importações e rotas problemáticas</p>
+        </div>
+      </div>
+
+      <div id="analisesEmpty" class="empty-state">
+        <div class="ic">📈</div>
+        <div>Nenhum dado importado ainda. Vá em <b>Importar CSV</b>.</div>
+      </div>
+
+      <div id="analisesContent" style="display:none;">
+
+        <h3 style="font-size:14px;margin-bottom:4px;">🏆 Ranking de funcionários</h3>
+        <p style="color:var(--text-dim);font-size:12px;margin-bottom:12px;">Ordene por volume, taxa de acerto ou tempo médio</p>
+        <div class="filter-bar">
+          <select id="rankSortBy">
+            <option value="total">Ordenar por: Volume de pacotes</option>
+            <option value="taxa">Ordenar por: Taxa de acerto</option>
+            <option value="tempo">Ordenar por: Tempo médio (mais rápido primeiro)</option>
+            <option value="rotas">Ordenar por: Rotas únicas</option>
+          </select>
+        </div>
+        <div class="table-wrap" style="margin-bottom:10px;">
+          <table id="tblRanking">
+            <thead><tr><th>#</th><th>Funcionário</th><th>Pacotes</th><th>Rotas únicas</th><th>Tempo médio</th><th>Taxa de acerto</th><th>Incorretos</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="charts-grid">
+          <div class="chart-box"><h3>Top 10 — Volume de pacotes</h3><canvas id="chartRankVolume"></canvas></div>
+          <div class="chart-box"><h3>Top 10 — Taxa de acerto</h3><canvas id="chartRankTaxa"></canvas></div>
+        </div>
+
+        <h3 style="margin-top:32px;font-size:14px;margin-bottom:4px;">📊 Comparativo entre importações (lotes/dias)</h3>
+        <p style="color:var(--text-dim);font-size:12px;margin-bottom:12px;">Cada importação de CSV vira um ponto de comparação — útil pra ver evolução dia a dia</p>
+        <div class="charts-grid">
+          <div class="chart-box"><h3>Pacotes por lote importado</h3><canvas id="chartLoteVolume"></canvas></div>
+          <div class="chart-box"><h3>Taxa de acerto por lote importado</h3><canvas id="chartLoteTaxa"></canvas></div>
+        </div>
+
+        <h3 style="margin-top:32px;font-size:14px;margin-bottom:4px;">⚠️ Rotas com mais problemas</h3>
+        <p style="color:var(--text-dim);font-size:12px;margin-bottom:12px;">Rotas ordenadas pela maior taxa de erro (mínimo 2 pacotes na rota)</p>
+        <div class="table-wrap">
+          <table id="tblRotasProblema">
+            <thead><tr><th>Rota</th><th>Total de pacotes</th><th>Incorretos</th><th>Taxa de erro</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+      </div>
+    </section>
+
     <!-- ===================== HISTORICO ===================== -->
     <section class="view" id="view-historico">
       <div class="view-header">
@@ -380,7 +432,6 @@ let SQL = null;
 let db = null;
 let charts = {}; // guarda instâncias Chart.js pra destruir ao redesenhar
 let currentEmployee = null;
-let pendingParsed = null; // dados aguardando confirmação de mapeamento
 
 const LS_KEY = 'docas_sqlite_db_v1';
 const LS_HIST_KEY = 'docas_historico_v1';
@@ -451,15 +502,7 @@ function q(sql, params=[]){
    MENU NAVIGATION
 ========================================================= */
 document.querySelectorAll('.menu-item').forEach(item=>{
-  item.addEventListener('click', ()=>{
-    document.querySelectorAll('.menu-item').forEach(m=>m.classList.remove('active'));
-    document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
-    item.classList.add('active');
-    document.getElementById('view-'+item.dataset.view).classList.add('active');
-    if(item.dataset.view === 'resumo') renderResumo();
-    if(item.dataset.view === 'funcionarios') renderFuncionarios();
-    if(item.dataset.view === 'historico') renderHistorico();
-  });
+  item.addEventListener('click', ()=> goToView(item.dataset.view));
 });
 
 /* =========================================================
@@ -518,52 +561,17 @@ function handleFile(file){
         horario: guessColumn(headers, COLUMN_ALIASES.horario),
         status: guessColumn(headers, COLUMN_ALIASES.status)
       };
-      pendingParsed = { data: res.data, headers, mapping, filename: file.name };
-      showMappingUI(headers, mapping);
+      if(!mapping.funcionario || !mapping.id_pacote){
+        document.getElementById('uploadStatus').innerHTML = `<p style="color:var(--err);font-size:12.5px;">Não consegui identificar as colunas de Funcionário e/ou ID do Pacote nesse CSV. Colunas encontradas: ${headers.join(', ')}.</p>`;
+        return;
+      }
+      importData(res.data, mapping, file.name);
     },
     error: err => {
       document.getElementById('uploadStatus').innerHTML = `<p style="color:var(--err);font-size:12.5px;">Erro ao ler CSV: ${err.message}</p>`;
     }
   });
 }
-
-function showMappingUI(headers, mapping){
-  const fields = [
-    ['funcionario','Funcionário'],['rota','Rota'],['id_pacote','ID do Pacote'],
-    ['horario','Horário'],['status','Status (correto/incorreto)']
-  ];
-  let html = `<div class="card" style="margin-top:14px;"><b style="font-size:12.5px;">Confirme o mapeamento de colunas:</b>
-  <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin-top:12px;">`;
-  fields.forEach(([key,label])=>{
-    html += `<div>
-      <label style="font-size:11px;color:var(--text-dim);display:block;margin-bottom:4px;">${label}</label>
-      <select id="map_${key}" style="width:100%;background:var(--bg-panel2);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;">
-        <option value="">-- não usar --</option>
-        ${headers.map(h=>`<option value="${h}" ${h===mapping[key]?'selected':''}>${h}</option>`).join('')}
-      </select>
-    </div>`;
-  });
-  html += `</div></div>`;
-  document.getElementById('mapArea').innerHTML = html;
-  document.getElementById('btnMapColumns').style.display = 'inline-block';
-  document.getElementById('uploadStatus').innerHTML = `<p style="color:var(--text-dim);font-size:12.5px;">${pendingParsed.data.length} linhas encontradas em "${pendingParsed.filename}".</p>`;
-}
-
-document.getElementById('btnMapColumns').addEventListener('click', ()=>{
-  if(!pendingParsed) return;
-  const mapping = {
-    funcionario: document.getElementById('map_funcionario').value,
-    rota: document.getElementById('map_rota').value,
-    id_pacote: document.getElementById('map_id_pacote').value,
-    horario: document.getElementById('map_horario').value,
-    status: document.getElementById('map_status').value
-  };
-  if(!mapping.funcionario || !mapping.id_pacote){
-    toast('Selecione pelo menos as colunas Funcionário e ID do Pacote.');
-    return;
-  }
-  importData(pendingParsed.data, mapping, pendingParsed.filename);
-});
 
 function parseStatus(val){
   if(val === undefined || val === null) return 1;
@@ -597,12 +605,19 @@ function importData(rows, mapping, filename){
   persist();
 
   document.getElementById('uploadStatus').innerHTML = `<p style="color:var(--ok);font-size:13px;">✔ ${count} pacotes importados com sucesso (lote #${loteId}).</p>`;
-  document.getElementById('mapArea').innerHTML = '';
-  document.getElementById('btnMapColumns').style.display = 'none';
-  pendingParsed = null;
   fileInput.value = '';
-  toast(`Importação concluída: ${count} linhas.`);
+  toast(`Importação concluída: ${count} linhas. Abrindo resumo...`);
   refreshAllViews();
+  goToView('resumo');
+}
+
+function goToView(viewName){
+  document.querySelectorAll('.menu-item').forEach(m=>m.classList.toggle('active', m.dataset.view === viewName));
+  document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active', v.id === 'view-'+viewName));
+  if(viewName === 'resumo') renderResumo();
+  if(viewName === 'funcionarios') renderFuncionarios();
+  if(viewName === 'analises') renderAnalises();
+  if(viewName === 'historico') renderHistorico();
 }
 
 /* =========================================================
@@ -638,6 +653,7 @@ function destroyChart(id){
 function refreshAllViews(){
   renderResumo();
   renderFuncionarios();
+  renderAnalises();
   renderHistorico();
 }
 
@@ -843,6 +859,121 @@ function renderDetTable(){
 }
 
 /* =========================================================
+   ANÁLISES — Ranking, comparativo entre lotes, rotas problemáticas
+========================================================= */
+function renderAnalises(){
+  const total = q("SELECT COUNT(*) as c FROM pacotes")[0].c;
+  if(total === 0){
+    document.getElementById('analisesEmpty').style.display = 'block';
+    document.getElementById('analisesContent').style.display = 'none';
+    return;
+  }
+  document.getElementById('analisesEmpty').style.display = 'none';
+  document.getElementById('analisesContent').style.display = 'block';
+
+  renderRanking();
+  renderComparativoLotes();
+  renderRotasProblema();
+}
+
+function computeRankingData(){
+  const funcionarios = q(`SELECT DISTINCT funcionario FROM pacotes`).map(r=>r.funcionario);
+  return funcionarios.map(nome=>{
+    const rows = q(`SELECT rota, horario, correto FROM pacotes WHERE funcionario=?`, [nome]);
+    const total = rows.length;
+    const corretos = rows.filter(r=>r.correto===1).length;
+    const incorretos = total - corretos;
+    const rotasUnicas = new Set(rows.map(r=>r.rota).filter(Boolean)).size;
+    const tempos = rows.map(r=>parseTimeToMinutes(r.horario)).filter(v=>v!==null);
+    const tempoMedio = tempos.length ? tempos.reduce((a,b)=>a+b,0)/tempos.length : null;
+    const taxa = total > 0 ? (corretos/total)*100 : 0;
+    return { nome, total, incorretos, rotasUnicas, tempoMedio, taxa };
+  });
+}
+
+function renderRanking(){
+  const sortBy = document.getElementById('rankSortBy').value;
+  let data = computeRankingData();
+  if(sortBy === 'total') data.sort((a,b)=>b.total-a.total);
+  else if(sortBy === 'taxa') data.sort((a,b)=>b.taxa-a.taxa);
+  else if(sortBy === 'tempo') data.sort((a,b)=>(a.tempoMedio??Infinity)-(b.tempoMedio??Infinity));
+  else if(sortBy === 'rotas') data.sort((a,b)=>b.rotasUnicas-a.rotasUnicas);
+
+  const medals = ['🥇','🥈','🥉'];
+  const tb = document.querySelector('#tblRanking tbody');
+  tb.innerHTML = data.map((r,i)=>`<tr>
+    <td>${medals[i]||(i+1)}</td>
+    <td><b>${r.nome}</b></td>
+    <td>${r.total}</td>
+    <td>${r.rotasUnicas}</td>
+    <td>${minutesToHHMM(r.tempoMedio)}</td>
+    <td>${r.taxa.toFixed(1)}%</td>
+    <td>${r.incorretos>0?`<span class="badge err">${r.incorretos}</span>`:'<span class="badge ok">0</span>'}</td>
+  </tr>`).join('') || `<tr><td colspan="7" style="color:var(--text-dim);">Sem dados.</td></tr>`;
+
+  const top10Volume = [...data].sort((a,b)=>b.total-a.total).slice(0,10);
+  destroyChart('rankVolume');
+  charts.rankVolume = new Chart(document.getElementById('chartRankVolume'), {
+    type:'bar',
+    data:{ labels: top10Volume.map(r=>r.nome), datasets:[{ label:'Pacotes', data: top10Volume.map(r=>r.total), backgroundColor:'#ff8a3d', borderRadius:4 }] },
+    options: { ...baseChartOpts(), indexAxis:'y' }
+  });
+
+  const top10Taxa = [...data].filter(r=>r.total>0).sort((a,b)=>b.taxa-a.taxa).slice(0,10);
+  destroyChart('rankTaxa');
+  charts.rankTaxa = new Chart(document.getElementById('chartRankTaxa'), {
+    type:'bar',
+    data:{ labels: top10Taxa.map(r=>r.nome), datasets:[{ label:'Taxa de acerto (%)', data: top10Taxa.map(r=>r.taxa.toFixed(1)), backgroundColor:'#3ddc84', borderRadius:4 }] },
+    options: { ...baseChartOpts(), indexAxis:'y', scales:{ x:{ min:0, max:100, ticks:{ color:'#8b96a5' }, grid:{ color:'#26313f' } }, y:{ ticks:{ color:'#8b96a5', font:{size:10} }, grid:{ color:'#26313f' } } } }
+  });
+}
+document.getElementById('rankSortBy').addEventListener('change', renderRanking);
+
+function renderComparativoLotes(){
+  const lotes = q(`SELECT id, arquivo, data_importacao FROM lotes ORDER BY id ASC`);
+  const labels = [];
+  const volumeData = [];
+  const taxaData = [];
+  lotes.forEach(l=>{
+    const rows = q(`SELECT correto FROM pacotes WHERE lote_id=?`, [l.id]);
+    if(rows.length === 0) return;
+    const corretos = rows.filter(r=>r.correto===1).length;
+    const d = new Date(l.data_importacao);
+    labels.push(`#${l.id} ${d.toLocaleDateString('pt-BR')}`);
+    volumeData.push(rows.length);
+    taxaData.push(((corretos/rows.length)*100).toFixed(1));
+  });
+
+  destroyChart('loteVolume');
+  charts.loteVolume = new Chart(document.getElementById('chartLoteVolume'), {
+    type:'bar',
+    data:{ labels, datasets:[{ label:'Pacotes', data: volumeData, backgroundColor:'#4d9fff', borderRadius:4 }] },
+    options: baseChartOpts()
+  });
+
+  destroyChart('loteTaxa');
+  charts.loteTaxa = new Chart(document.getElementById('chartLoteTaxa'), {
+    type:'line',
+    data:{ labels, datasets:[{ label:'Taxa de acerto (%)', data: taxaData, borderColor:'#3ddc84', backgroundColor:'rgba(61,220,132,.15)', fill:true, tension:.3 }] },
+    options:{ ...baseChartOpts(), scales:{ x:{ ticks:{ color:'#8b96a5', font:{size:10} }, grid:{ color:'#26313f' } }, y:{ min:0, max:100, ticks:{ color:'#8b96a5' }, grid:{ color:'#26313f' } } } }
+  });
+}
+
+function renderRotasProblema(){
+  const rows = q(`SELECT rota, COUNT(*) as total, SUM(CASE WHEN correto=0 THEN 1 ELSE 0 END) as erros FROM pacotes WHERE rota != '' GROUP BY rota HAVING total >= 2 ORDER BY (CAST(erros as FLOAT)/total) DESC, erros DESC LIMIT 20`);
+  const tb = document.querySelector('#tblRotasProblema tbody');
+  tb.innerHTML = rows.map(r=>{
+    const taxaErro = ((r.erros/r.total)*100).toFixed(1);
+    return `<tr>
+      <td><b>${r.rota}</b></td>
+      <td>${r.total}</td>
+      <td>${r.erros>0?`<span class="badge err">${r.erros}</span>`:'<span class="badge ok">0</span>'}</td>
+      <td>${taxaErro}%</td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="4" style="color:var(--text-dim);">Nenhuma rota com pacotes suficientes para análise.</td></tr>`;
+}
+
+/* =========================================================
    HISTORICO
 ========================================================= */
 function renderHistorico(){
@@ -995,4 +1126,3 @@ initSQL();
 </script>
 </body>
 </html>
-
